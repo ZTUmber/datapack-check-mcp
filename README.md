@@ -2,8 +2,6 @@
 
 用 [Spyglass](https://spyglassmc.com/) 语言服务器检查 Minecraft Java 版数据包，通过 MCP stdio 把诊断交给任意 MCP 客户端。
 
-复用 VS Code 插件 Datapack Helper Plus背后的同一套引擎：`@spyglassmc/language-server`。拿到的红线与编辑器 Problems 同源。
-
 ## 工具
 
 | 工具 | 作用 |
@@ -33,7 +31,7 @@ npm run build
 ```json
 {
   "command": "node",
-  "args": ["D:/c/datapack-check-mcp/dist/index.js"],
+  "args": ["D:/datapack-check-mcp/dist/index.js"],
   "env": {
     "DATAPACK_WORKSPACE": "D:/path/to/your-datapack-or-workspace"
   }
@@ -51,6 +49,10 @@ node dist/index.js --check-project test/fixture-pack
 
 有 error 时退出码为 `2`。
 
+## Agent Skill
+
+`skills/datapack-check/SKILL.md` 规定何时调用本 MCP。把它复制到所用 Agent 的 skills 目录后，写数据包时会走检查流程。
+
 ## 环境变量
 
 | 变量 | 默认 | 含义 |
@@ -59,5 +61,3 @@ node dist/index.js --check-project test/fixture-pack
 | `DATAPACK_CHECK_READY_TIMEOUT_MS` | `180000` | 等 Spyglass 就绪（含首次缓存） |
 | `DATAPACK_CHECK_FILE_TIMEOUT_MS` | `30000` | `check_file` 等诊断 |
 | `DATAPACK_CHECK_LOCALE` | `en` | Spyglass 诊断语言 |
-
-日志打在 stderr，避免污染 MCP/LSP 的 stdout。
