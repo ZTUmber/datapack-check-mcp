@@ -59,6 +59,6 @@ node dist/index.js --check-project test/fixture-pack
 |---|---|---|
 | `DATAPACK_WORKSPACE` | （推断） | Spyglass 工作区根 |
 | `DATAPACK_CHECK_READY_TIMEOUT_MS` | `180000` | 等 Spyglass 就绪（含首次缓存） |
-| `DATAPACK_CHECK_FILE_TIMEOUT_MS` | `8000` | `check_file` 等诊断 |
+| `DATAPACK_CHECK_FILE_TIMEOUT_MS` | `8000` | CLI `check_file` 等诊断；MCP 的 `check_file` 在工具预算内等待，超时返回 `incomplete` 而不是报错 |
 | `DATAPACK_CHECK_PROJECT_TIMEOUT_MS` | `600000` | `check_project` 整包分析等待上限（随文件数放大，封顶 10 分钟） |
 | `DATAPACK_CHECK_LOCALE` | `en` | Spyglass 诊断语言 |

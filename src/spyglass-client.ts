@@ -43,6 +43,7 @@ const BULK_OPEN_THRESHOLD = 20;
 const STARTING_MESSAGE =
   "Spyglass is still starting (first run binds vanilla cache and the pack). Call check_project again.";
 const RETRY_MESSAGE = "Project analysis is still running. Call check_project again.";
+const FILE_RETRY_MESSAGE = "Spyglass diagnostics for this file are still running. Call check_file again.";
 
 export type CheckOptions = {
   budgetMs?: number;
@@ -91,12 +92,21 @@ export class SpyglassSession {
         message: STARTING_MESSAGE,
       });
     }
-    await this.openAndWait(abs, Math.min(FILE_TIMEOUT_MS, remainingMs(deadline)));
     const uri = toFileUri(abs);
-    return formatDiagnostics(
-      workspace,
-      new Map([[uri, this.diagnostics.get(uriKey(uri)) ?? []]]),
-    );
+    const key = uriKey(uri);
+    if (!this.diagnostics.has(key)) {
+      this.notifyWatched([abs]);
+    }
+    const waitMs = deadline != null ? remainingMs(deadline) : FILE_TIMEOUT_MS;
+    const ready = await this.openAndWait(abs, waitMs);
+    const items = this.diagnostics.get(key) ?? [];
+    if (!ready) {
+      return formatDiagnostics(workspace, new Map([[uri, items]]), {
+        incomplete: true,
+        message: FILE_RETRY_MESSAGE,
+      });
+    }
+    return formatDiagnostics(workspace, new Map([[uri, items]]));
   }
 
   async checkProject(rootPath?: string, options?: CheckOptions): Promise<CheckResult> {
@@ -134,7 +144,13 @@ export class SpyglassSession {
     let incomplete = false;
     let message: string | undefined;
     const waitMs = remainingMs(deadline);
-    if (fullScan || toOpen.length > BULK_OPEN_THRESHOLD) {
+    const unseen = toOpen.filter((file) => !this.diagnostics.has(uriKey(toFileUri(file))));
+    if (unseen.length > 0) {
+      log(`check_project: ${unseen.length} unseen files, seeding file watcher`);
+      this.notifyWatched(unseen);
+      await sleep(Math.min(DIAG_SETTLE_MS, waitMs));
+    }
+    if (fullScan || toOpen.length > BULK_OPEN_THRESHOLD || unseen.length > 0) {
       incomplete = !(await this.analyzeWholeProject(localFiles, toOpen, waitMs));
     } else if (toOpen.length > 0) {
       incomplete = !(await this.openFilesAndWait(toOpen, waitMs));
@@ -394,12 +410,12 @@ export class SpyglassSession {
     return key;
   }
 
-  private async openAndWait(filePath: string, timeoutMs = FILE_TIMEOUT_MS): Promise<void> {
+  private async openAndWait(filePath: string, timeoutMs = FILE_TIMEOUT_MS): Promise<boolean> {
     const uri = toFileUri(filePath);
     const key = uriKey(uri);
     const revBefore = this.diagRev.get(key) ?? 0;
     this.sendOpenOrChange(filePath);
-    await this.waitForRevision(key, uri, revBefore, FILE_TIMEOUT_MS);
+    return this.waitForRevision(key, uri, revBefore, timeoutMs);
   }
 
   private waitForRevision(
@@ -407,8 +423,8 @@ export class SpyglassSession {
     uri: string,
     revBefore: number,
     timeoutMs: number,
-  ): Promise<void> {
-    return new Promise((resolve, reject) => {
+  ): Promise<boolean> {
+    return new Promise((resolve) => {
       let settled = false;
       let debounce: NodeJS.Timeout | undefined;
 
@@ -422,7 +438,7 @@ export class SpyglassSession {
         if (debounce) {
           clearTimeout(debounce);
         }
-        resolve();
+        resolve(true);
       };
 
       const onDiag = (received: string) => {
@@ -444,13 +460,10 @@ export class SpyglassSession {
           return;
         }
         settled = true;
-        if (this.diagnostics.has(key)) {
-          resolve();
-          return;
+        if (!this.diagnostics.has(key)) {
+          log(`check_file: timed out waiting for diagnostics ${uri} (${timeoutMs}ms)`);
         }
-        reject(
-          new Error(`Timed out waiting for Spyglass diagnostics: ${uri} (${timeoutMs}ms)`),
-        );
+        resolve(this.diagnostics.has(key));
       }, timeoutMs);
 
       this.diagWaiters.add(onDiag);
