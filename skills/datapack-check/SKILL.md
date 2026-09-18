@@ -28,7 +28,7 @@ MCP 工具不在当前会话里：停手，告诉用户先启动 `datapack-check
 
 `path` / `root` 用绝对路径。`root` 指向带 `pack.mcmeta` 的目录；工作区有多个包时对每个包根各查一次，或指向它们的共同父目录。
 
-第一次调用会拉原版缓存，可能要几分钟。等结果，不要当失败重试一堆。
+第一次调用会拉原版缓存，可能要几分钟。`incomplete: true` 时立刻再调 `check_project`；其它失败不要连着重试一堆。
 
 ## 工作流
 
@@ -36,7 +36,8 @@ MCP 工具不在当前会话里：停手，告诉用户先启动 `datapack-check
 2. 只改了一两个文件：立刻 `check_file`。
 3. 一次改了很多文件：**不要**对每个文件串行 `check_file`，改完调一次 `check_project`。
 4. 有 error：按 `path` + `line` + `message` 修，再查刚修的那些文件（少量用 `check_file`，仍很多就再 `check_project`）。
-5. 只有最后一次检查 `ok: true`（或只剩用户要保留的 warning）才能说写完了。
+5. 返回 `incomplete: true`：Spyglass 还在后台跑。立刻再调一次 `check_project`，不要当成失败，也不要开始改文件。
+6. 只有最后一次检查 `ok: true` 且 `incomplete` 不为 true（或只剩用户要保留的 warning）才能说写完了。
 
 ## 怎么读结果
 

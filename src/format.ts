@@ -28,6 +28,7 @@ export interface CheckResult {
   cancelled?: boolean;
   openedFiles?: number;
   incomplete?: boolean;
+  message?: string;
 }
 
 export function severityName(severity?: DiagnosticSeverity): Severity {
@@ -50,7 +51,7 @@ export function formatDiagnostics(
   byUri: Map<string, Diagnostic[]>,
   extra?: Pick<
     CheckResult,
-    "analyzedFiles" | "totalFiles" | "cancelled" | "openedFiles" | "incomplete"
+    "analyzedFiles" | "totalFiles" | "cancelled" | "openedFiles" | "incomplete" | "message"
   >,
 ): CheckResult {
   const diagnostics: CheckDiagnostic[] = [];

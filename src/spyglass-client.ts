@@ -40,6 +40,19 @@ const FILE_TIMEOUT_MS = envMs("DATAPACK_CHECK_FILE_TIMEOUT_MS", 8_000);
 const PROJECT_TIMEOUT_MS = envMs("DATAPACK_CHECK_PROJECT_TIMEOUT_MS", 600_000);
 const DIAG_SETTLE_MS = 400;
 const BULK_OPEN_THRESHOLD = 20;
+const STARTING_MESSAGE =
+  "Spyglass is still starting (first run binds vanilla cache and the pack). Call check_project again.";
+const RETRY_MESSAGE = "Project analysis is still running. Call check_project again.";
+
+export type CheckOptions = {
+  budgetMs?: number;
+};
+
+type AnalyzeProjectResult = {
+  analyzedFiles: number;
+  totalFiles: number;
+  cancelled: boolean;
+};
 
 function resolveLanguageServer(): string {
   const pkgJson = require.resolve("@spyglassmc/language-server/package.json");
@@ -62,14 +75,23 @@ export class SpyglassSession {
   private readyPromise: Promise<void> | undefined;
   private diagWaiters = new Set<(uri: string) => void>();
   private starting: Promise<void> | undefined;
+  private analyzePromise: Promise<AnalyzeProjectResult | undefined> | undefined;
 
-  async checkFile(filePath: string): Promise<CheckResult> {
+  async checkFile(filePath: string, options?: CheckOptions): Promise<CheckResult> {
     const abs = path.resolve(filePath);
     const workspace = process.env.DATAPACK_WORKSPACE
       ? path.resolve(process.env.DATAPACK_WORKSPACE)
       : findPackRoot(abs);
-    await this.ensure(workspace);
-    await this.openAndWait(abs);
+    const deadline = deadlineOf(options?.budgetMs);
+    const boot = this.ensure(workspace);
+    boot.catch((error) => log(error instanceof Error ? error.message : error));
+    if (!(await waitBudget(boot, remainingMs(deadline))).ok) {
+      return formatDiagnostics(workspace, new Map(), {
+        incomplete: true,
+        message: STARTING_MESSAGE,
+      });
+    }
+    await this.openAndWait(abs, Math.min(FILE_TIMEOUT_MS, remainingMs(deadline)));
     const uri = toFileUri(abs);
     return formatDiagnostics(
       workspace,
@@ -77,7 +99,7 @@ export class SpyglassSession {
     );
   }
 
-  async checkProject(rootPath?: string): Promise<CheckResult> {
+  async checkProject(rootPath?: string, options?: CheckOptions): Promise<CheckResult> {
     const start = rootPath
       ? path.resolve(rootPath)
       : process.env.DATAPACK_WORKSPACE
@@ -86,13 +108,20 @@ export class SpyglassSession {
     const workspace = process.env.DATAPACK_WORKSPACE
       ? path.resolve(process.env.DATAPACK_WORKSPACE)
       : findPackRoot(start);
-    await this.ensure(workspace);
+    const deadline = deadlineOf(options?.budgetMs);
+    const boot = this.ensure(workspace);
+    boot.catch((error) => log(error instanceof Error ? error.message : error));
 
     const localFiles = listDatapackFiles(workspace);
     if (localFiles.length === 0) {
       throw new Error(
         `No datapack files found under ${workspace}. Open a folder that contains pack.mcmeta.`,
       );
+    }
+
+    if (!(await waitBudget(boot, remainingMs(deadline))).ok) {
+      log(`check_project: returning before Spyglass ready, ${localFiles.length} files`);
+      return this.projectResult(workspace, localFiles, 0, true, STARTING_MESSAGE);
     }
 
     const toOpen = localFiles.filter((file) => this.shouldReopen(file));
@@ -103,26 +132,41 @@ export class SpyglassSession {
     );
 
     let incomplete = false;
+    let message: string | undefined;
+    const waitMs = remainingMs(deadline);
     if (fullScan || toOpen.length > BULK_OPEN_THRESHOLD) {
-      incomplete = !(await this.analyzeWholeProject(localFiles, toOpen));
+      incomplete = !(await this.analyzeWholeProject(localFiles, toOpen, waitMs));
     } else if (toOpen.length > 0) {
-      incomplete = !(await this.openFilesAndWait(toOpen));
+      incomplete = !(await this.openFilesAndWait(toOpen, waitMs));
+    }
+    if (incomplete) {
+      message = RETRY_MESSAGE;
+    } else {
+      this.analyzedAt = Date.now();
     }
 
-    this.analyzedAt = Date.now();
+    return this.projectResult(workspace, localFiles, toOpen.length, incomplete, message);
+  }
 
+  private projectResult(
+    workspace: string,
+    localFiles: string[],
+    openedFiles: number,
+    incomplete: boolean,
+    message?: string,
+  ): CheckResult {
     const localDiagnostics = new Map<string, Diagnostic[]>();
     for (const [uri, items] of this.diagnostics) {
       if (uri.startsWith("file:")) {
         localDiagnostics.set(uri, items);
       }
     }
-
     return formatDiagnostics(workspace, localDiagnostics, {
       analyzedFiles: localFiles.length,
       totalFiles: localFiles.length,
-      openedFiles: toOpen.length,
+      openedFiles,
       incomplete,
+      message,
     });
   }
 
@@ -138,6 +182,7 @@ export class SpyglassSession {
     this.diagRev.clear();
     this.lastDiagAt = 0;
     this.analyzedAt = undefined;
+    this.analyzePromise = undefined;
 
     if (connection) {
       try {
@@ -349,7 +394,7 @@ export class SpyglassSession {
     return key;
   }
 
-  private async openAndWait(filePath: string): Promise<void> {
+  private async openAndWait(filePath: string, timeoutMs = FILE_TIMEOUT_MS): Promise<void> {
     const uri = toFileUri(filePath);
     const key = uriKey(uri);
     const revBefore = this.diagRev.get(key) ?? 0;
@@ -427,54 +472,60 @@ export class SpyglassSession {
     }
   }
 
-  private async analyzeWholeProject(allFiles: string[], toOpen: string[]): Promise<boolean> {
+  private async analyzeWholeProject(
+    allFiles: string[],
+    toOpen: string[],
+    waitMs: number,
+  ): Promise<boolean> {
     log(`check_project: spyglassmc/analyzeProject for ${allFiles.length} files`);
-    try {
-      let result = await this.sendAnalyzeProject(allFiles.length);
-      if (result && result.analyzedFiles === 0) {
-        log("check_project: analyzeProject saw 0 files, seeding file watcher");
-        this.notifyWatched(allFiles);
-        await sleep(400);
-        result = await this.sendAnalyzeProject(allFiles.length);
-      }
-
-      if (!result) {
-        log("check_project: analyzeProject returned nothing, falling back to opening files");
-        return this.openFilesAndWait(toOpen);
-      }
-      log(
-        `check_project: analyzeProject analyzed=${result.analyzedFiles} total=${result.totalFiles} cancelled=${result.cancelled}`,
-      );
-      await sleep(DIAG_SETTLE_MS);
-      if (result.analyzedFiles === 0) {
-        return this.openFilesAndWait(toOpen);
-      }
-      return !result.cancelled;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      log(message);
-      if (message.includes("timed out")) {
-        return false;
-      }
-      return this.openFilesAndWait(toOpen);
+    const pending = this.startAnalyze();
+    const waited = await waitBudget(pending, waitMs);
+    if (!waited.ok) {
+      log("check_project: analyzeProject still running, returning partial result");
+      return false;
     }
-  }
+    let result = waited.value;
+    if (result && result.analyzedFiles === 0) {
+      log("check_project: analyzeProject saw 0 files, seeding file watcher");
+      this.notifyWatched(allFiles);
+      await sleep(Math.min(400, waitMs));
+      result = await this.startAnalyze();
+    }
 
-  private sendAnalyzeProject(fileCount: number): Promise<{
-    analyzedFiles: number;
-    totalFiles: number;
-    cancelled: boolean;
-  } | undefined> {
-    return withTimeout(
-      this.connection!.sendRequest("spyglassmc/analyzeProject") as Promise<
-        { analyzedFiles: number; totalFiles: number; cancelled: boolean } | undefined
-      >,
-      projectWaitMs(fileCount),
-      `spyglassmc/analyzeProject timed out after ${projectWaitMs(fileCount)}ms`,
+    if (!result) {
+      log("check_project: analyzeProject returned nothing, falling back to opening files");
+      return this.openFilesAndWait(toOpen, waitMs);
+    }
+    log(
+      `check_project: analyzeProject analyzed=${result.analyzedFiles} total=${result.totalFiles} cancelled=${result.cancelled}`,
     );
+    if (result.analyzedFiles === 0) {
+      return this.openFilesAndWait(toOpen, waitMs);
+    }
+    return !result.cancelled;
   }
 
-  private async openFilesAndWait(files: string[]): Promise<boolean> {
+  private startAnalyze(): Promise<AnalyzeProjectResult | undefined> {
+    if (this.analyzePromise) {
+      return this.analyzePromise;
+    }
+    const pending = this.connection!.sendRequest("spyglassmc/analyzeProject") as Promise<
+      AnalyzeProjectResult | undefined
+    >;
+    this.analyzePromise = pending
+      .then((result) => {
+        if (result && result.analyzedFiles > 0 && !result.cancelled) {
+          this.analyzedAt = Date.now();
+        }
+        return result;
+      })
+      .finally(() => {
+        this.analyzePromise = undefined;
+      });
+    return this.analyzePromise;
+  }
+
+  private async openFilesAndWait(files: string[], waitMs: number): Promise<boolean> {
     if (files.length === 0) {
       return true;
     }
@@ -483,7 +534,7 @@ export class SpyglassSession {
     for (const file of files) {
       this.sendOpenOrChange(file);
     }
-    return this.waitForCoverage(keys, batchStart, projectWaitMs(files.length));
+    return this.waitForCoverage(keys, batchStart, Math.min(projectWaitMs(files.length), waitMs));
   }
 
   private shouldReopen(filePath: string): boolean {
@@ -538,6 +589,39 @@ function sleep(ms: number): Promise<void> {
 
 function projectWaitMs(openCount: number): number {
   return Math.min(600_000, Math.max(PROJECT_TIMEOUT_MS, openCount * 1500));
+}
+
+function deadlineOf(budgetMs?: number): number | undefined {
+  return budgetMs == null ? undefined : Date.now() + budgetMs;
+}
+
+function remainingMs(deadline: number | undefined): number {
+  if (deadline == null) {
+    return PROJECT_TIMEOUT_MS;
+  }
+  return Math.max(0, deadline - Date.now());
+}
+
+function waitBudget<T>(
+  promise: Promise<T>,
+  ms: number,
+): Promise<{ ok: true; value: T } | { ok: false }> {
+  if (ms <= 0) {
+    return Promise.resolve({ ok: false });
+  }
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => resolve({ ok: false }), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve({ ok: true, value });
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {

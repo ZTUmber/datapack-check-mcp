@@ -6,6 +6,7 @@ import { log, SpyglassSession } from "./spyglass-client.js";
 import { resolveExistingPath } from "./workspace.js";
 
 const session = new SpyglassSession();
+const MCP_TOOL_BUDGET_MS = 45_000;
 
 function jsonResult(payload: unknown, isError = false) {
   return {
@@ -67,7 +68,9 @@ async function runMcp(): Promise<void> {
     },
     async ({ path: filePath }) => {
       try {
-        const result = await session.checkFile(resolveExistingPath(filePath));
+        const result = await session.checkFile(resolveExistingPath(filePath), {
+          budgetMs: MCP_TOOL_BUDGET_MS,
+        });
         return jsonResult(result);
       } catch (error) {
         return errorResult(error);
@@ -80,7 +83,7 @@ async function runMcp(): Promise<void> {
     {
       title: "Check datapack project",
       description:
-        "Run Spyglass (Datapack Helper Plus engine) on every .mcfunction, pack JSON, .mcmeta, .snbt, and .mcdoc file under a datapack workspace. Pass the pack root (folder with pack.mcmeta) or a parent folder. First run may download the vanilla cache and take a few minutes.",
+        "Run Spyglass (Datapack Helper Plus engine) on every .mcfunction, pack JSON, .mcmeta, .snbt, and .mcdoc file under a datapack workspace. Pass the pack root (folder with pack.mcmeta) or a parent folder. First run may take longer than a client timeout; if incomplete is true, call again immediately.",
       inputSchema: {
         root: z
           .string()
@@ -90,7 +93,9 @@ async function runMcp(): Promise<void> {
     },
     async ({ root }) => {
       try {
-        const result = await session.checkProject(root ? resolveExistingPath(root) : undefined);
+        const result = await session.checkProject(root ? resolveExistingPath(root) : undefined, {
+          budgetMs: MCP_TOOL_BUDGET_MS,
+        });
         return jsonResult(result);
       } catch (error) {
         return errorResult(error);
