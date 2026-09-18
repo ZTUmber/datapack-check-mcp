@@ -59,5 +59,6 @@ node dist/index.js --check-project test/fixture-pack
 |---|---|---|
 | `DATAPACK_WORKSPACE` | （推断） | Spyglass 工作区根 |
 | `DATAPACK_CHECK_READY_TIMEOUT_MS` | `180000` | 等 Spyglass 就绪（含首次缓存） |
-| `DATAPACK_CHECK_FILE_TIMEOUT_MS` | `30000` | `check_file` 等诊断 |
+| `DATAPACK_CHECK_FILE_TIMEOUT_MS` | `8000` | `check_file` 等诊断 |
+| `DATAPACK_CHECK_PROJECT_TIMEOUT_MS` | `120000` | `check_project` 等诊断静默 |
 | `DATAPACK_CHECK_LOCALE` | `en` | Spyglass 诊断语言 |

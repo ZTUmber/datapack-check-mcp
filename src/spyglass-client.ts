@@ -36,7 +36,8 @@ function envMs(name: string, fallback: number): number {
 }
 
 const READY_TIMEOUT_MS = envMs("DATAPACK_CHECK_READY_TIMEOUT_MS", 180_000);
-const FILE_TIMEOUT_MS = envMs("DATAPACK_CHECK_FILE_TIMEOUT_MS", 30_000);
+const FILE_TIMEOUT_MS = envMs("DATAPACK_CHECK_FILE_TIMEOUT_MS", 8_000);
+const PROJECT_TIMEOUT_MS = envMs("DATAPACK_CHECK_PROJECT_TIMEOUT_MS", 120_000);
 const DIAG_SETTLE_MS = 400;
 
 function resolveLanguageServer(): string {
@@ -54,6 +55,8 @@ export class SpyglassSession {
   private child: ChildProcess | undefined;
   private diagnostics = new Map<string, Diagnostic[]>();
   private openVersions = new Map<string, number>();
+  private diagRev = new Map<string, number>();
+  private lastDiagAt = 0;
   private readyPromise: Promise<void> | undefined;
   private diagWaiters = new Set<(uri: string) => void>();
   private starting: Promise<void> | undefined;
@@ -90,9 +93,11 @@ export class SpyglassSession {
       );
     }
 
+    const batchStarted = Date.now();
     for (const file of localFiles) {
-      await this.openAndWait(file);
+      this.sendOpenOrChange(file);
     }
+    await this.waitUntilQuiet(batchStarted, DIAG_SETTLE_MS, PROJECT_TIMEOUT_MS);
 
     const localDiagnostics = new Map<string, Diagnostic[]>();
     for (const [uri, items] of this.diagnostics) {
@@ -116,6 +121,8 @@ export class SpyglassSession {
     this.workspaceRoot = undefined;
     this.diagnostics.clear();
     this.openVersions.clear();
+    this.diagRev.clear();
+    this.lastDiagAt = 0;
 
     if (connection) {
       try {
@@ -290,6 +297,8 @@ export class SpyglassSession {
       (params: { uri: string; diagnostics: Diagnostic[] }) => {
         const key = uriKey(params.uri);
         this.diagnostics.set(key, params.diagnostics);
+        this.diagRev.set(key, (this.diagRev.get(key) ?? 0) + 1);
+        this.lastDiagAt = Date.now();
         for (const waiter of this.diagWaiters) {
           waiter(params.uri);
         }
@@ -304,7 +313,7 @@ export class SpyglassSession {
     connection.onNotification("window/showMessageRequest", () => undefined);
   }
 
-  private async openAndWait(filePath: string): Promise<void> {
+  private sendOpenOrChange(filePath: string): string {
     const uri = toFileUri(filePath);
     const text = fs.readFileSync(filePath, "utf8");
     const languageId = languageIdFor(filePath);
@@ -312,7 +321,6 @@ export class SpyglassSession {
     const nextVersion = (this.openVersions.get(key) ?? 0) + 1;
     this.openVersions.set(key, nextVersion);
 
-    const pending = this.waitForDiagnostics(uri, FILE_TIMEOUT_MS);
     if (nextVersion === 1) {
       this.connection!.sendNotification("textDocument/didOpen", {
         textDocument: { uri, languageId, version: nextVersion, text },
@@ -323,13 +331,23 @@ export class SpyglassSession {
         contentChanges: [{ text }],
       });
     }
-    await pending;
+    return key;
   }
 
-  private waitForDiagnostics(uri: string, timeoutMs: number): Promise<void> {
+  private async openAndWait(filePath: string): Promise<void> {
+    const uri = toFileUri(filePath);
     const key = uriKey(uri);
-    const alreadyHad = this.diagnostics.has(key);
-    const waitMs = alreadyHad ? Math.min(timeoutMs, 2000) : timeoutMs;
+    const revBefore = this.diagRev.get(key) ?? 0;
+    this.sendOpenOrChange(filePath);
+    await this.waitForRevision(key, uri, revBefore, FILE_TIMEOUT_MS);
+  }
+
+  private waitForRevision(
+    key: string,
+    uri: string,
+    revBefore: number,
+    timeoutMs: number,
+  ): Promise<void> {
     return new Promise((resolve, reject) => {
       let settled = false;
       let debounce: NodeJS.Timeout | undefined;
@@ -351,6 +369,9 @@ export class SpyglassSession {
         if (uriKey(received) !== key) {
           return;
         }
+        if ((this.diagRev.get(key) ?? 0) <= revBefore) {
+          return;
+        }
         if (debounce) {
           clearTimeout(debounce);
         }
@@ -368,15 +389,34 @@ export class SpyglassSession {
           return;
         }
         reject(
-          new Error(
-            `Timed out waiting for Spyglass diagnostics: ${uri} (${waitMs}ms)`,
-          ),
+          new Error(`Timed out waiting for Spyglass diagnostics: ${uri} (${timeoutMs}ms)`),
         );
-      }, waitMs);
+      }, timeoutMs);
 
       this.diagWaiters.add(onDiag);
+      if ((this.diagRev.get(key) ?? 0) > revBefore) {
+        debounce = setTimeout(finish, DIAG_SETTLE_MS);
+      }
     });
   }
+
+  private async waitUntilQuiet(since: number, quietMs: number, maxMs: number): Promise<void> {
+    const deadline = Date.now() + maxMs;
+    while (Date.now() < deadline) {
+      if (this.lastDiagAt < since) {
+        if (Date.now() - since >= quietMs) {
+          return;
+        }
+      } else if (Date.now() - this.lastDiagAt >= quietMs) {
+        return;
+      }
+      await sleep(50);
+    }
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {

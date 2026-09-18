@@ -33,10 +33,10 @@ MCP 工具不在当前会话里：停手，告诉用户先启动 `datapack-check
 ## 工作流
 
 1. 改文件。
-2. 对每个改过的数据包文件调用 `check_file`。
-3. 还有 error：按返回的 `path` + `line` + `message` 修，再 `check_file`。禁止无视 diagnostics 继续加功能。
-4. 本轮改动结束：对包根调用 `check_project`。仍有 error 则继续修到 `ok: true`（或只剩用户明确要保留的 warning）。
-5. 只有 `check_project` 通过后才能说「写完了 / 修好了」。
+2. 只改了一两个文件：立刻 `check_file`。
+3. 一次改了很多文件：**不要**对每个文件串行 `check_file`，改完调一次 `check_project`。
+4. 有 error：按 `path` + `line` + `message` 修，再查刚修的那些文件（少量用 `check_file`，仍很多就再 `check_project`）。
+5. 只有最后一次检查 `ok: true`（或只剩用户要保留的 warning）才能说写完了。
 
 ## 怎么读结果
 
@@ -57,5 +57,6 @@ JSON 字段：`ok`、`errorCount`、`warningCount`、`diagnostics[]`（`path`、
 
 - 用网页记忆或「看起来合法」代替 `check_file`
 - 改了文件却只检查其中一个
+- 改了一大批文件还逐个 `check_file`，再全包扫一遍（一次 `check_project` 即可）
 - 把 warning 当 error 大改结构
 - 为了过检查削弱用户要的效果
