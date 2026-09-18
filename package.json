@@ -1,0 +1,37 @@
+{
+  "name": "datapack-check-mcp",
+  "version": "0.1.0",
+  "description": "MCP server that checks Minecraft datapacks with the Spyglass language server (the engine behind Datapack Helper Plus).",
+  "type": "module",
+  "bin": {
+    "datapack-check-mcp": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "check-file": "node dist/index.js --check-file",
+    "check-project": "node dist/index.js --check-project"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "minecraft",
+    "datapack",
+    "spyglass",
+    "mcp",
+    "mcfunction"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.18.0",
+    "@spyglassmc/language-server": "^0.4.69",
+    "vscode-jsonrpc": "^8.2.1",
+    "vscode-languageserver-protocol": "^3.17.5",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "typescript": "^5.8.0"
+  }
+}

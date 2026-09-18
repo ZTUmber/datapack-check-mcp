@@ -1,0 +1,1 @@
+data modify entity @a run say 1
