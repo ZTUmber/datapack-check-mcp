@@ -52,7 +52,12 @@ export function languageIdFor(filePath: string): string {
 }
 
 export function toFileUri(filePath: string): string {
-  return pathToFileURL(path.resolve(filePath)).href;
+  return normalizeSpyglassUri(pathToFileURL(path.resolve(filePath)).href);
+}
+
+/** Match Spyglass `normalizeUri`: lowercase Windows drive letters so `isSubUriOf` can see pack files. */
+export function normalizeSpyglassUri(uri: string): string {
+  return uri.replace(/%3A/gi, ":").replace(/^file:\/\/\/[A-Z]:/, (match) => match.toLowerCase());
 }
 
 export function toFolderUri(dirPath: string): string {

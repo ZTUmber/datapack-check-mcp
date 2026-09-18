@@ -39,6 +39,7 @@ const READY_TIMEOUT_MS = envMs("DATAPACK_CHECK_READY_TIMEOUT_MS", 180_000);
 const FILE_TIMEOUT_MS = envMs("DATAPACK_CHECK_FILE_TIMEOUT_MS", 8_000);
 const PROJECT_TIMEOUT_MS = envMs("DATAPACK_CHECK_PROJECT_TIMEOUT_MS", 600_000);
 const DIAG_SETTLE_MS = 400;
+const BULK_OPEN_THRESHOLD = 20;
 
 function resolveLanguageServer(): string {
   const pkgJson = require.resolve("@spyglassmc/language-server/package.json");
@@ -95,19 +96,17 @@ export class SpyglassSession {
     }
 
     const toOpen = localFiles.filter((file) => this.shouldReopen(file));
+    const fullScan = toOpen.length === localFiles.length;
     log(
-      `check_project: ${localFiles.length} files, opening ${toOpen.length}` +
-        (toOpen.length === localFiles.length ? " (full scan)" : ""),
+      `check_project: ${localFiles.length} files, ${toOpen.length} stale` +
+        (fullScan ? " (full scan)" : ""),
     );
 
     let incomplete = false;
-    if (toOpen.length > 0) {
-      const keys = toOpen.map((file) => uriKey(toFileUri(file)));
-      const batchStart = Date.now();
-      for (const file of toOpen) {
-        this.sendOpenOrChange(file);
-      }
-      incomplete = !(await this.waitForCoverage(keys, batchStart, projectWaitMs(toOpen.length)));
+    if (fullScan || toOpen.length > BULK_OPEN_THRESHOLD) {
+      incomplete = !(await this.analyzeWholeProject(localFiles, toOpen));
+    } else if (toOpen.length > 0) {
+      incomplete = !(await this.openFilesAndWait(toOpen));
     }
 
     this.analyzedAt = Date.now();
@@ -287,7 +286,6 @@ export class SpyglassSession {
       `Spyglass did not become ready within ${READY_TIMEOUT_MS}ms (first run downloads the vanilla datapack cache).`,
     );
     log("Spyglass ready");
-    this.analyzedAt = Date.now();
   }
 
   private bindConnection(connection: MessageConnection): void {
@@ -417,13 +415,84 @@ export class SpyglassSession {
     });
   }
 
+  private notifyWatched(files: string[]): void {
+    const Created = 1;
+    const chunkSize = 100;
+    for (let i = 0; i < files.length; i += chunkSize) {
+      const changes = files.slice(i, i + chunkSize).map((file) => ({
+        uri: toFileUri(file),
+        type: Created,
+      }));
+      this.connection!.sendNotification("workspace/didChangeWatchedFiles", { changes });
+    }
+  }
+
+  private async analyzeWholeProject(allFiles: string[], toOpen: string[]): Promise<boolean> {
+    log(`check_project: spyglassmc/analyzeProject for ${allFiles.length} files`);
+    try {
+      let result = await this.sendAnalyzeProject(allFiles.length);
+      if (result && result.analyzedFiles === 0) {
+        log("check_project: analyzeProject saw 0 files, seeding file watcher");
+        this.notifyWatched(allFiles);
+        await sleep(400);
+        result = await this.sendAnalyzeProject(allFiles.length);
+      }
+
+      if (!result) {
+        log("check_project: analyzeProject returned nothing, falling back to opening files");
+        return this.openFilesAndWait(toOpen);
+      }
+      log(
+        `check_project: analyzeProject analyzed=${result.analyzedFiles} total=${result.totalFiles} cancelled=${result.cancelled}`,
+      );
+      await sleep(DIAG_SETTLE_MS);
+      if (result.analyzedFiles === 0) {
+        return this.openFilesAndWait(toOpen);
+      }
+      return !result.cancelled;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      log(message);
+      if (message.includes("timed out")) {
+        return false;
+      }
+      return this.openFilesAndWait(toOpen);
+    }
+  }
+
+  private sendAnalyzeProject(fileCount: number): Promise<{
+    analyzedFiles: number;
+    totalFiles: number;
+    cancelled: boolean;
+  } | undefined> {
+    return withTimeout(
+      this.connection!.sendRequest("spyglassmc/analyzeProject") as Promise<
+        { analyzedFiles: number; totalFiles: number; cancelled: boolean } | undefined
+      >,
+      projectWaitMs(fileCount),
+      `spyglassmc/analyzeProject timed out after ${projectWaitMs(fileCount)}ms`,
+    );
+  }
+
+  private async openFilesAndWait(files: string[]): Promise<boolean> {
+    if (files.length === 0) {
+      return true;
+    }
+    const keys = files.map((file) => uriKey(toFileUri(file)));
+    const batchStart = Date.now();
+    for (const file of files) {
+      this.sendOpenOrChange(file);
+    }
+    return this.waitForCoverage(keys, batchStart, projectWaitMs(files.length));
+  }
+
   private shouldReopen(filePath: string): boolean {
+    if (this.analyzedAt == null) {
+      return true;
+    }
     const key = uriKey(toFileUri(filePath));
     if (!this.diagnostics.has(key)) {
       return true;
-    }
-    if (this.analyzedAt == null) {
-      return false;
     }
     try {
       return fs.statSync(filePath).mtimeMs >= this.analyzedAt - 2000;
