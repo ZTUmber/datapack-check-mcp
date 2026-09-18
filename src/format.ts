@@ -26,6 +26,8 @@ export interface CheckResult {
   analyzedFiles?: number;
   totalFiles?: number;
   cancelled?: boolean;
+  openedFiles?: number;
+  incomplete?: boolean;
 }
 
 export function severityName(severity?: DiagnosticSeverity): Severity {
@@ -46,7 +48,10 @@ export function severityName(severity?: DiagnosticSeverity): Severity {
 export function formatDiagnostics(
   workspace: string,
   byUri: Map<string, Diagnostic[]>,
-  extra?: Pick<CheckResult, "analyzedFiles" | "totalFiles" | "cancelled">,
+  extra?: Pick<
+    CheckResult,
+    "analyzedFiles" | "totalFiles" | "cancelled" | "openedFiles" | "incomplete"
+  >,
 ): CheckResult {
   const diagnostics: CheckDiagnostic[] = [];
   for (const [uri, items] of byUri) {
@@ -78,7 +83,7 @@ export function formatDiagnostics(
   const warningCount = diagnostics.filter((d) => d.severity === "warning").length;
 
   return {
-    ok: errorCount === 0 && extra?.cancelled !== true,
+    ok: errorCount === 0 && extra?.cancelled !== true && extra?.incomplete !== true,
     workspace,
     engine: "spyglassmc-language-server",
     errorCount,

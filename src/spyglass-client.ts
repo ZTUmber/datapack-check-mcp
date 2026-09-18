@@ -37,7 +37,7 @@ function envMs(name: string, fallback: number): number {
 
 const READY_TIMEOUT_MS = envMs("DATAPACK_CHECK_READY_TIMEOUT_MS", 180_000);
 const FILE_TIMEOUT_MS = envMs("DATAPACK_CHECK_FILE_TIMEOUT_MS", 8_000);
-const PROJECT_TIMEOUT_MS = envMs("DATAPACK_CHECK_PROJECT_TIMEOUT_MS", 120_000);
+const PROJECT_TIMEOUT_MS = envMs("DATAPACK_CHECK_PROJECT_TIMEOUT_MS", 600_000);
 const DIAG_SETTLE_MS = 400;
 
 function resolveLanguageServer(): string {
@@ -57,6 +57,7 @@ export class SpyglassSession {
   private openVersions = new Map<string, number>();
   private diagRev = new Map<string, number>();
   private lastDiagAt = 0;
+  private analyzedAt: number | undefined;
   private readyPromise: Promise<void> | undefined;
   private diagWaiters = new Set<(uri: string) => void>();
   private starting: Promise<void> | undefined;
@@ -93,11 +94,23 @@ export class SpyglassSession {
       );
     }
 
-    const batchStarted = Date.now();
-    for (const file of localFiles) {
-      this.sendOpenOrChange(file);
+    const toOpen = localFiles.filter((file) => this.shouldReopen(file));
+    log(
+      `check_project: ${localFiles.length} files, opening ${toOpen.length}` +
+        (toOpen.length === localFiles.length ? " (full scan)" : ""),
+    );
+
+    let incomplete = false;
+    if (toOpen.length > 0) {
+      const keys = toOpen.map((file) => uriKey(toFileUri(file)));
+      const batchStart = Date.now();
+      for (const file of toOpen) {
+        this.sendOpenOrChange(file);
+      }
+      incomplete = !(await this.waitForCoverage(keys, batchStart, projectWaitMs(toOpen.length)));
     }
-    await this.waitUntilQuiet(batchStarted, DIAG_SETTLE_MS, PROJECT_TIMEOUT_MS);
+
+    this.analyzedAt = Date.now();
 
     const localDiagnostics = new Map<string, Diagnostic[]>();
     for (const [uri, items] of this.diagnostics) {
@@ -109,6 +122,8 @@ export class SpyglassSession {
     return formatDiagnostics(workspace, localDiagnostics, {
       analyzedFiles: localFiles.length,
       totalFiles: localFiles.length,
+      openedFiles: toOpen.length,
+      incomplete,
     });
   }
 
@@ -123,6 +138,7 @@ export class SpyglassSession {
     this.openVersions.clear();
     this.diagRev.clear();
     this.lastDiagAt = 0;
+    this.analyzedAt = undefined;
 
     if (connection) {
       try {
@@ -271,6 +287,7 @@ export class SpyglassSession {
       `Spyglass did not become ready within ${READY_TIMEOUT_MS}ms (first run downloads the vanilla datapack cache).`,
     );
     log("Spyglass ready");
+    this.analyzedAt = Date.now();
   }
 
   private bindConnection(connection: MessageConnection): void {
@@ -400,23 +417,58 @@ export class SpyglassSession {
     });
   }
 
-  private async waitUntilQuiet(since: number, quietMs: number, maxMs: number): Promise<void> {
-    const deadline = Date.now() + maxMs;
+  private shouldReopen(filePath: string): boolean {
+    const key = uriKey(toFileUri(filePath));
+    if (!this.diagnostics.has(key)) {
+      return true;
+    }
+    if (this.analyzedAt == null) {
+      return false;
+    }
+    try {
+      return fs.statSync(filePath).mtimeMs >= this.analyzedAt - 2000;
+    } catch {
+      return true;
+    }
+  }
+
+  private async waitForCoverage(
+    keys: string[],
+    batchStart: number,
+    timeoutMs: number,
+  ): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    const quietMs = Math.max(DIAG_SETTLE_MS, 800);
     while (Date.now() < deadline) {
-      if (this.lastDiagAt < since) {
-        if (Date.now() - since >= quietMs) {
-          return;
+      if (keys.every((key) => this.diagnostics.has(key))) {
+        await sleep(DIAG_SETTLE_MS);
+        return true;
+      }
+      if (this.lastDiagAt >= batchStart && Date.now() - this.lastDiagAt >= quietMs) {
+        const missing = keys.filter((key) => !this.diagnostics.has(key)).length;
+        if (missing > 0) {
+          log(`check_project: Spyglass went quiet, ${missing}/${keys.length} files sent no diagnostics`);
         }
-      } else if (Date.now() - this.lastDiagAt >= quietMs) {
-        return;
+        return missing === 0;
+      }
+      if (this.lastDiagAt < batchStart && Date.now() - batchStart >= 60_000) {
+        log("check_project: no new diagnostics 60s after opening files");
+        return false;
       }
       await sleep(50);
     }
+    const missing = keys.filter((key) => !this.diagnostics.has(key)).length;
+    log(`check_project: timed out after ${timeoutMs}ms, still missing ${missing}/${keys.length}`);
+    return false;
   }
 }
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function projectWaitMs(openCount: number): number {
+  return Math.min(600_000, Math.max(PROJECT_TIMEOUT_MS, openCount * 1500));
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
